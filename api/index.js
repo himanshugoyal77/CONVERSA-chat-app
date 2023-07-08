@@ -8,6 +8,8 @@ const bcrypt = require("bcryptjs");
 const ws = require("ws");
 // directory: imports
 const User = require("./models/User.js");
+const Message = require("./models/Message.js");
+
 const connect = require("./connect.js");
 
 dotenv.config();
@@ -23,6 +25,21 @@ app.use(
     origin: "http://127.0.0.1:5173",
   })
 );
+
+async function getUserData(req) {
+  return new Promise((resolve, reject) => {
+    const token = req.cookies.token;
+    if (!token) {
+      reject("No token provided");
+    }
+    jwt.verify(token, process.env.JWT_SECRET, {}, async (err, decoded) => {
+      if (err) {
+        reject(err);
+      }
+      resolve(decoded);
+    });
+  });
+}
 
 app.get("/api/profile", (req, res) => {
   const { token } = req.cookies;
@@ -98,6 +115,22 @@ app.post("/api/register", async (req, res) => {
   }
 });
 
+app.get("/api/messages/:userId", async (req, res) => {
+  if (!req.params.userId) {
+    res.status(400).json("User not found");
+    return;
+  }
+
+  const userId = req.params.userId;
+  const userData = await getUserData(req);
+  const messages = await Message.find({
+    sender: { $in: [userId, userData.userId] },
+    recipient: { $in: [userId, userData.userId] },
+  }).sort({ createdAt: 1 });
+
+  res.status(200).json(messages);
+});
+
 const server = app.listen(4000, () => {
   connect();
   console.log("Server running on port 4000");
@@ -109,6 +142,7 @@ const wss = new ws.Server({ server });
 wss.on("connection", (connection, req) => {
   const cookies = req.headers.cookie;
   //find user from cookies
+  //read username and userId from cookie of this connection
   if (cookies) {
     const tokenCookieString = cookies
       .split(";")
@@ -125,6 +159,32 @@ wss.on("connection", (connection, req) => {
       }
     }
   }
+
+  connection.on("message", async (message) => {
+    const parsedMessage = JSON.parse(message);
+    const { recipient, text } = parsedMessage;
+    if (recipient && text) {
+      const messageDoc = await Message.create({
+        sender: connection.userId,
+        recipient,
+        text,
+      });
+      [...wss.clients]
+        .filter((c) => c.userId === recipient)
+        .forEach((c) =>
+          c.send(
+            JSON.stringify({
+              text,
+              sender: connection.userId,
+              _id: messageDoc._id,
+              recipient,
+            })
+          )
+        );
+    }
+  });
+
+  //send online users to all clients
   [...wss.clients].forEach((client) => {
     client.send(
       JSON.stringify({
